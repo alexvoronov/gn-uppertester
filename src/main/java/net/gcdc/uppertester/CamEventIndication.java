@@ -5,4 +5,11 @@ public class CamEventIndication implements Response {
     short camPduLength;
     @SizeFromField("camPduLength")
     byte[] camPdu;
+
+    public CamEventIndication() { this(new byte[] {}); }
+
+    public CamEventIndication(byte[] camPdu) {
+        this.camPdu = camPdu.clone();
+        this.camPduLength = (short) this.camPdu.length;
+    }
 }

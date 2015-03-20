@@ -11,6 +11,6 @@ public class BtpEventIndication implements Response {
 
     public BtpEventIndication(byte[] packet) {
         this.packet = packet.clone();
-        this.packetLength = (short) packet.length;
+        this.packetLength = (short) this.packet.length;
     }
 }

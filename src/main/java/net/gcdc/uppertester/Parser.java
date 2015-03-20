@@ -28,6 +28,7 @@ public class Parser {
             CamTriggerResult.class,
             CamTriggerSetAccelerationControlStatus.class,
             CamTriggerSetDangerousGoods.class,
+            CamTriggerSetDangerousGoodsExt.class,
             CamTriggerSetDriveDirection.class,
             CamTriggerSetEmbarkationStatus.class,
             CamTriggerSetExteriorLightsStatus.class,

@@ -5,4 +5,11 @@ public class DenmEventIndication implements Response {
     short denmPduLength;
     @SizeFromField("denmPduLength")
     byte[] denmPdu;
+
+    public DenmEventIndication() { this(new byte[] {}); }
+
+    public DenmEventIndication(byte[] denmPdu) {
+        this.denmPdu = denmPdu.clone();
+        this.denmPduLength = (short)this.denmPdu.length;
+    }
 }
