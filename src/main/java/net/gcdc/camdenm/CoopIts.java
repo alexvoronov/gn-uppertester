@@ -1053,7 +1053,7 @@ public class CoopIts {
         public PtActivationData(byte... coll) {
             this(boxed(coll));
         }
-        public PtActivationData(Byte... coll) {
+        private PtActivationData(Byte... coll) {
             this(Arrays.asList(coll));
         }
         public PtActivationData(Collection<Byte> coll) {
