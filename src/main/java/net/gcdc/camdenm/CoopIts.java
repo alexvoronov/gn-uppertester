@@ -990,22 +990,22 @@ public class CoopIts {
     @HasExtensionMarker
     public static class SpecialVehicleContainer {
         PublicTransportContainer publicTransportContainer;
-        Object specialTransportContainer;
-        Object dangerousGoodsContainer;
+        SpecialTransportContainer specialTransportContainer;
+        DangerousGoodsContainer dangerousGoodsContainer;
         RoadWorksContainerBasic roadWorksContainerBasic;
-        Object rescueContainer;
-        Object emergencyContainer;
-        Object safetyCarContainer;
+        RescueContainer rescueContainer;
+        EmergencyContainer emergencyContainer;
+        SafetyCarContainer safetyCarContainer;
 
         public SpecialVehicleContainer() { this(new PublicTransportContainer()); }
 
-        public SpecialVehicleContainer(PublicTransportContainer publicTransportContainer) {
-            this.publicTransportContainer = publicTransportContainer;
-        }
-
-        public SpecialVehicleContainer(RoadWorksContainerBasic roadWorksContainerBasic) {
-            this.roadWorksContainerBasic = roadWorksContainerBasic;
-        }
+        public SpecialVehicleContainer(PublicTransportContainer publicTransportContainer) { this.publicTransportContainer = publicTransportContainer; }
+        public SpecialVehicleContainer(SpecialTransportContainer specialTransportContainer) { this.specialTransportContainer = specialTransportContainer; }
+        public SpecialVehicleContainer(DangerousGoodsContainer dangerousGoodsContainer) { this.dangerousGoodsContainer = dangerousGoodsContainer; }
+        public SpecialVehicleContainer(RoadWorksContainerBasic roadWorksContainerBasic) { this.roadWorksContainerBasic = roadWorksContainerBasic; }
+        public SpecialVehicleContainer(RescueContainer rescueContainer) { this.rescueContainer = rescueContainer; }
+        public SpecialVehicleContainer(EmergencyContainer emergencyContainer) { this.emergencyContainer = emergencyContainer; }
+        public SpecialVehicleContainer(SafetyCarContainer safetyCarContainer) { this.safetyCarContainer = safetyCarContainer; }
     }
 
     @Sequence
@@ -1048,11 +1048,89 @@ public class CoopIts {
     @SizeRange(minValue = 1, maxValue = 20)
     public static class PtActivationData extends Asn1SequenceOf<Byte> {
         public PtActivationData() {
-            super(Arrays.asList((byte)0));  // min size is 1.
+            this(new byte[] {0});  // min size is 1.
+        }
+        public PtActivationData(byte... coll) {
+            this(boxed(coll));
         }
         public PtActivationData(Byte... coll) {
-            super(Arrays.asList(coll));
+            this(Arrays.asList(coll));
         }
+        public PtActivationData(Collection<Byte> coll) {
+            super(coll);
+        }
+
+        private static Byte[] boxed(byte... coll) {
+            Byte[] boxedArray = new Byte[coll.length];
+            for (int i = 0; i < coll.length; i++) { boxedArray[i] = coll[i]; }
+            return boxedArray;
+        }
+    }
+
+    @Sequence
+    public static class SpecialTransportContainer {
+        SpecialTransportType specialTransportType;
+        LightBarSirenInUse lightBarSirenInUse;
+
+        public SpecialTransportContainer() { this (new SpecialTransportType(), new LightBarSirenInUse()); }
+        public SpecialTransportContainer(SpecialTransportType specialTransportType,
+        LightBarSirenInUse lightBarSirenInUse) {
+            this.specialTransportType = specialTransportType;
+            this.lightBarSirenInUse = lightBarSirenInUse;
+        }
+    }
+
+    @Bitstring
+    @FixedSize(4)
+    public static class SpecialTransportType {
+        boolean heavyLoad;     // Bit 0
+        boolean excessWidth;   // Bit 1
+        boolean excessLength;  // Bit 2
+        boolean excessHeight;  // Bit 3
+    }
+
+    @Sequence
+    public static class DangerousGoodsContainer {
+        DangerousGoodsBasic dangerousGoodsBasic;
+
+        public DangerousGoodsContainer() { this (DangerousGoodsBasic.defaultValue()); }
+        public DangerousGoodsContainer(DangerousGoodsBasic dangerousGoodsBasic) {
+            this.dangerousGoodsBasic = dangerousGoodsBasic;
+        }
+    }
+
+    public static enum DangerousGoodsBasic {
+        explosives1(0),
+        explosives2(1),
+        explosives3(2),
+        explosives4(3),
+        explosives5(4),
+        explosives6(5),
+        flammableGases(6),
+        nonFlammableGases(7),
+        toxicGases(8),
+        flammableLiquids(9),
+        flammableSolids(10),
+        substancesLiableToSpontaneousCombustion(11),
+        substancesEmittingFlammableGasesUponContactWithWater(12),
+        oxidizingSubstances(13),
+        organicPeroxides(14),
+        toxicSubstances(15),
+        infectiousSubstances(16),
+        radioactiveMaterial(17),
+        corrosiveSubstances(18),
+        miscellaneousDangerousSubstances(19);
+
+        private final int value;
+        public int value() { return value; }
+        private DangerousGoodsBasic(int value) { this.value = value; }
+        public static DangerousGoodsBasic defaultValue() { return explosives1; }
+        public static DangerousGoodsBasic fromCode(int value) {
+            for (DangerousGoodsBasic element : values()) { if (element.value() == value) { return element; } }
+            throw new IllegalArgumentException("Can't find element in enum " +
+                    DangerousGoodsBasic.class.getName() + " for code " + value);
+        }
+
     }
 
     @Sequence
@@ -1186,6 +1264,136 @@ public class CoopIts {
             }
         }
 
+    }
+
+    @Sequence
+    public static class RescueContainer {
+        LightBarSirenInUse lightBarSirenInUse;
+
+        public RescueContainer() { this(new LightBarSirenInUse()); }
+        public RescueContainer(LightBarSirenInUse lightBarSirenInUse) {
+            this.lightBarSirenInUse = lightBarSirenInUse;
+        }
+    }
+
+    @Sequence
+    public static class EmergencyContainer {
+        LightBarSirenInUse lightBarSirenInUse;
+        @Asn1Optional CauseCode incidentIndication;
+        @Asn1Optional EmergencyPriority emergencyPriority;
+
+        public EmergencyContainer() { this(new LightBarSirenInUse()); }
+
+        public EmergencyContainer(LightBarSirenInUse lightBarSirenInUse) {
+            this(lightBarSirenInUse, null, null);
+        }
+
+        public EmergencyContainer(LightBarSirenInUse lightBarSirenInUse,
+        CauseCode incidentIndication,
+        EmergencyPriority emergencyPriority) {
+            this.lightBarSirenInUse = lightBarSirenInUse;
+            this.incidentIndication = incidentIndication;
+            this.emergencyPriority = emergencyPriority;
+        }
+    }
+
+    @Sequence
+    public static class CauseCode {
+        CauseCodeType causeCode;
+        SubCauseCodeType subCauseCode;
+
+        public CauseCode() { this(new CauseCodeType(), new SubCauseCodeType()); }
+        public CauseCode(CauseCodeType causeCode,
+        SubCauseCodeType subCauseCode) {
+            this.causeCode = causeCode;
+            this.subCauseCode = subCauseCode;
+        }
+    }
+
+
+    @IntRange(minValue = 0, maxValue = 255)
+    public static class CauseCodeType extends Asn1Integer {
+        public static final int reserved = 0;
+        public static final int trafficCondition = 1;
+        public static final int accident = 2;
+        public static final int roadworks = 3;
+        public static final int adverseWeatherCondition_Adhesion = 6;
+        public static final int hazardousLocation_SurfaceCondition = 9;
+        public static final int hazardousLocation_ObstacleOnTheRoad = 10;
+        public static final int hazardousLocation_AnimalOnTheRoad = 11;
+        public static final int humanPresenceOnTheRoad = 12;
+        public static final int wrongWayDriving = 14;
+        public static final int rescueAndRecoveryWorkInProgress = 15;
+        public static final int adverseWeatherCondition_ExtremeWeatherCondition = 17;
+        public static final int adverseWeatherCondition_Visibility = 18;
+        public static final int adverseWeatherCondition_Precipitation = 19;
+        public static final int slowVehicle = 26;
+        public static final int dangerousEndOfQueue = 27;
+        public static final int vehicleBreakdown = 91;
+        public static final int postCrash = 92;
+        public static final int humanProblem = 93;
+        public static final int stationaryVehicle = 94;
+        public static final int emergencyVehicleApproaching = 95;
+        public static final int hazardousLocation_DangerousCurve = 96;
+        public static final int collisionRisk = 97;
+        public static final int signalViolation = 98;
+        public static final int dangerousSituation = 99;
+
+        public CauseCodeType() { this(reserved); }
+        public CauseCodeType(int value) { super(value); }
+    }
+
+    @IntRange(minValue = 0, maxValue = 255)
+    public static class SubCauseCodeType extends Asn1Integer {
+        public SubCauseCodeType() { this(0); }
+        public SubCauseCodeType(int value) { super(value); }
+    }
+
+    @Bitstring
+    @FixedSize(2)
+    public static class EmergencyPriority {
+        boolean requestForRightOfWay;  // Bit 0.
+        boolean requestForFreeCrossingAtATrafficLight;  // Bit 1.
+    }
+
+    @Sequence
+    public static class SafetyCarContainer {
+        LightBarSirenInUse lightBarSirenInUse;
+        @Asn1Optional CauseCode incidentIndication;
+        @Asn1Optional TrafficRule trafficRule;
+        @Asn1Optional SpeedLimit speedLimit;
+
+        public SafetyCarContainer() { this(new LightBarSirenInUse()); }
+        public SafetyCarContainer(LightBarSirenInUse lightBarSirenInUse) { this(lightBarSirenInUse, null, null, null); }
+        public SafetyCarContainer(LightBarSirenInUse lightBarSirenInUse,
+                CauseCode incidentIndication,
+             TrafficRule trafficRule,
+             SpeedLimit speedLimit) {
+            this.lightBarSirenInUse = lightBarSirenInUse;
+            this.incidentIndication = incidentIndication;
+            this.trafficRule = trafficRule;
+            this.speedLimit = speedLimit;
+        }
+    }
+
+    @HasExtensionMarker
+    public static enum TrafficRule {
+        noPassing(0),
+        noPassingForTrucks(1),
+        passToRight(2),
+        passToLeft(3);
+
+        private final int value;
+        public int value() { return value; }
+        private TrafficRule(int value) { this.value = value; }
+        public static TrafficRule defaultValue() { return noPassing; }
+    }
+
+    @IntRange(minValue = 1, maxValue = 255)
+    public static class SpeedLimit extends Asn1Integer {
+        public static final int oneKmPerHour = 1;
+        public SpeedLimit() { this(oneKmPerHour); }
+        public SpeedLimit(int value) { super(value); }
     }
 
     @Sequence

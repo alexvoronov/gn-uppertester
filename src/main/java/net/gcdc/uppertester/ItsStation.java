@@ -24,7 +24,10 @@ import net.gcdc.camdenm.CoopIts.CoopAwareness;
 import net.gcdc.camdenm.CoopIts.Curvature;
 import net.gcdc.camdenm.CoopIts.CurvatureConfidence;
 import net.gcdc.camdenm.CoopIts.CurvatureValue;
+import net.gcdc.camdenm.CoopIts.DangerousGoodsBasic;
+import net.gcdc.camdenm.CoopIts.DangerousGoodsContainer;
 import net.gcdc.camdenm.CoopIts.DriveDirection;
+import net.gcdc.camdenm.CoopIts.EmergencyContainer;
 import net.gcdc.camdenm.CoopIts.ExteriorLights;
 import net.gcdc.camdenm.CoopIts.GenerationDeltaTime;
 import net.gcdc.camdenm.CoopIts.Heading;
@@ -39,10 +42,17 @@ import net.gcdc.camdenm.CoopIts.Longitude;
 import net.gcdc.camdenm.CoopIts.LowFrequencyContainer;
 import net.gcdc.camdenm.CoopIts.PathHistory;
 import net.gcdc.camdenm.CoopIts.PosConfidenceEllipse;
+import net.gcdc.camdenm.CoopIts.PtActivation;
+import net.gcdc.camdenm.CoopIts.PtActivationData;
+import net.gcdc.camdenm.CoopIts.PtActivationType;
 import net.gcdc.camdenm.CoopIts.PublicTransportContainer;
 import net.gcdc.camdenm.CoopIts.ReferencePosition;
+import net.gcdc.camdenm.CoopIts.RescueContainer;
 import net.gcdc.camdenm.CoopIts.RoadWorksContainerBasic;
+import net.gcdc.camdenm.CoopIts.SafetyCarContainer;
 import net.gcdc.camdenm.CoopIts.SemiAxisLength;
+import net.gcdc.camdenm.CoopIts.SpecialTransportContainer;
+import net.gcdc.camdenm.CoopIts.SpecialTransportType;
 import net.gcdc.camdenm.CoopIts.SpecialVehicleContainer;
 import net.gcdc.camdenm.CoopIts.Speed;
 import net.gcdc.camdenm.CoopIts.SpeedConfidence;
@@ -371,7 +381,7 @@ public class ItsStation implements AutoCloseable {
                 sendReply(new CamTriggerResult(REPLY_SUCCESS));
             } else if (message instanceof CamTriggerSetDangerousGoodsExt) {
                 CamTriggerSetDangerousGoodsExt typedMessage = (CamTriggerSetDangerousGoodsExt) message;
-                vehicle.DangerousGoodExt = typedMessage.dangerousGoodExt;
+                vehicle.dangerousGoodExt = typedMessage.dangerousGoodExt;
                 sendReply(new CamTriggerResult(REPLY_SUCCESS));
             } else if (message instanceof CamTriggerSetLightBarSiren) {
                 CamTriggerSetLightBarSiren typedMessage = (CamTriggerSetLightBarSiren) message;
@@ -502,7 +512,7 @@ public class ItsStation implements AutoCloseable {
         byte vehicleRole;
         boolean embarkationStatus;
         byte dangerousGoods;
-        byte DangerousGoodExt;
+        byte dangerousGoodExt;
         byte lightBarSiren;
         byte ptActivationType;
         byte[] ptActivationData;
@@ -534,12 +544,46 @@ public class ItsStation implements AutoCloseable {
                 switch (vehicleRole) {
                     case 1:
                         specialVehicleContainer = new SpecialVehicleContainer(
-                                new PublicTransportContainer(embarkationStatus));
+                                new PublicTransportContainer(
+                                        embarkationStatus,
+                                        new PtActivation(
+                                                new PtActivationType(ptActivationType),
+                                                new PtActivationData(ptActivationData))));
+                        break;
+                    case 2:
+                        specialVehicleContainer = new SpecialVehicleContainer(
+                                new SpecialTransportContainer(
+                                        new SpecialTransportType(),
+                                        new LightBarSirenInUse(
+                                                (lightBarSiren & (1<<7)) != 0,
+                                                (lightBarSiren & (1<<6)) != 0)));
+                        break;
+                    case 3:
+                        specialVehicleContainer = new SpecialVehicleContainer(
+                                new DangerousGoodsContainer(DangerousGoodsBasic.fromCode(dangerousGoods)));
                         break;
                     case 4:
                         specialVehicleContainer = new SpecialVehicleContainer(
                                 new RoadWorksContainerBasic(
                                         new LightBarSirenInUse(
+                                                (lightBarSiren & (1<<7)) != 0,
+                                                (lightBarSiren & (1<<6)) != 0)));
+                        break;
+                    case 5:
+                        specialVehicleContainer = new SpecialVehicleContainer(
+                                new RescueContainer(new LightBarSirenInUse(
+                                                (lightBarSiren & (1<<7)) != 0,
+                                                (lightBarSiren & (1<<6)) != 0)));
+                        break;
+                    case 6:
+                        specialVehicleContainer = new SpecialVehicleContainer(
+                                new EmergencyContainer(new LightBarSirenInUse(
+                                                (lightBarSiren & (1<<7)) != 0,
+                                                (lightBarSiren & (1<<6)) != 0)));
+                        break;
+                    case 7:
+                        specialVehicleContainer = new SpecialVehicleContainer(
+                                new SafetyCarContainer(new LightBarSirenInUse(
                                                 (lightBarSiren & (1<<7)) != 0,
                                                 (lightBarSiren & (1<<6)) != 0)));
                         break;
