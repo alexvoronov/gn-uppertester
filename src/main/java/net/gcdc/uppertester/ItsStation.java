@@ -3,6 +3,7 @@ package net.gcdc.uppertester;
 import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.SocketException;
 import java.util.Arrays;
@@ -74,12 +75,14 @@ import net.gcdc.geonetworking.GeonetStation;
 import net.gcdc.geonetworking.LinkLayer;
 import net.gcdc.geonetworking.LinkLayerUdpToEthernet;
 import net.gcdc.geonetworking.LongPositionVector;
+import net.gcdc.geonetworking.MacAddress;
 import net.gcdc.geonetworking.Optional;
 import net.gcdc.geonetworking.Position;
 import net.gcdc.geonetworking.PositionProvider;
 import net.gcdc.geonetworking.StationConfig;
 import net.gcdc.geonetworking.TrafficClass;
 import net.gcdc.geonetworking.UpperProtocolType;
+import net.gcdc.geonetworking.gpsdclient.GpsdClient;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -113,7 +116,7 @@ public class ItsStation implements AutoCloseable {
     private final Vehicle vehicle;
 
     private final ExecutorService executor = Executors.newCachedThreadPool();
-    private final ScheduledExecutorService scheduledExecutor = Executors.newScheduledThreadPool(1);
+    private final ScheduledExecutorService scheduledExecutor = Executors.newScheduledThreadPool(5);
 
     private final static double MICRODEGREE = 1E-6;
     private final static byte REPLY_SUCCESS = 0x01;
@@ -130,12 +133,14 @@ public class ItsStation implements AutoCloseable {
 
     private final static long CAM_INITIAL_DELAY_MS = 20;  // At startup.
 
-    private final static int HIGH_DYNAMICS_CAM_COUNT = 3;
+    private final static int HIGH_DYNAMICS_CAM_COUNT = 4;
+
+    public final static double CAM_LIFETIME_SECONDS = 0.9;
 
     private final GeonetDataListener gnListener = new GeonetDataListener() {
         @Override public void onGeonetDataReceived(GeonetData indication) {
             try {
-                sendReply(new GnEventIndication(indication.payload));
+                sendReply(new GnEventIndication(indication.payload), defaultTsAddress, defaultUpperTesterPort);
             } catch (IllegalArgumentException | IllegalAccessException | IOException e) {
                 logger.warn("Failed to send unsolicited GN indication to the TestSystem", e);
             }
@@ -145,12 +150,16 @@ public class ItsStation implements AutoCloseable {
     private final Runnable btpListener = new Runnable() {
         @Override public void run() {
             try {
-                BtpPacket btpPacket = btpSocket.receive();
-                sendReply(new BtpEventIndication(btpPacket.payload()));
-                switch (btpPacket.destinationPort()) {
-                    case PORT_CAM: onCamReceived(btpPacket.payload()); break;
-                    case PORT_DENM: onDenmReceived(btpPacket.payload()); break;
-                    default: logger.info("Message for unsupported BTP port {}", btpPacket.destinationPort());
+                while(true) {
+
+                    BtpPacket btpPacket = btpSocket.receive();
+                    logger.debug("Sending BTP event indication");
+                    sendReply(new BtpEventIndication(btpPacket.payload()), defaultTsAddress, defaultUpperTesterPort);
+                    switch (btpPacket.destinationPort()) {
+                        case PORT_CAM: onCamReceived(btpPacket.payload()); break;
+                        case PORT_DENM: onDenmReceived(btpPacket.payload()); break;
+                        default: logger.info("Message for unsupported BTP port {}", btpPacket.destinationPort());
+                    }
                 }
             } catch (InterruptedException | IllegalArgumentException | IllegalAccessException
                     | IOException e) {
@@ -183,7 +192,7 @@ public class ItsStation implements AutoCloseable {
                 if (farEnough(lastSendPos, lpv)) {
                     highDynamicsCamToSend = HIGH_DYNAMICS_CAM_COUNT;
                 }
-                if (deltaTime >= (CAM_INTERVAL_MAX_MS - CAM_INTERVAL_MIN_MS) ||
+                if (deltaTime >= (CAM_INTERVAL_MAX_MS - 2 * CAM_INTERVAL_MIN_MS) ||
                         highDynamicsCamToSend > 0) {
                     final boolean withLowFreq = lowFreqDeltaTime >= CAM_LOW_FREQ_INTERVAL_MS;
                     Cam cam = vehicle.getCam(withLowFreq, (int) deltaTime, lpv);
@@ -194,7 +203,7 @@ public class ItsStation implements AutoCloseable {
                     if (withLowFreq) { lastSendLowFreq = lastSend; }
                     if (highDynamicsCamToSend > 0) { highDynamicsCamToSend--; }
                 } else {
-                    logger.debug("Skip CAM");
+                    //logger.debug("Skip CAM");
                 }
             }
         }
@@ -207,7 +216,7 @@ public class ItsStation implements AutoCloseable {
 
         private void send(Cam cam) {
             try {
-                BtpPacket packet = BtpPacket.singleHop(UperEncoder.encode(cam), PORT_CAM);
+                BtpPacket packet = BtpPacket.singleHop(UperEncoder.encode(cam), PORT_CAM, CAM_LIFETIME_SECONDS);
                 btpSocket.send(packet);
             } catch (IllegalArgumentException | IllegalAccessException e) {
                 logger.error("Failed to encode CAM", e);
@@ -219,17 +228,26 @@ public class ItsStation implements AutoCloseable {
 
     private final UpdatablePositionProvider position;
 
-    private static class UpdatablePositionProvider implements PositionProvider {
+    private InetAddress defaultTsAddress;
+
+    public static interface UpdatablePositionProvider extends PositionProvider {
+        public void move(double deltaLatDegrees, double deltaLonDegrees, double deltaElevation);
+        public void setSpeed(double speedMetersPerSecond);
+        public void setHeading(double headingDegreesFromNorth);
+    }
+
+    private static class StaticUpdatablePositionProvider implements UpdatablePositionProvider {
 
         private Position currentPosition;
 
         private double speedMetersPerSecond = 0;
         private double headingDegreesFromNorth = 0;
 
-        public UpdatablePositionProvider(Position initialPosition) {
+        public StaticUpdatablePositionProvider(Position initialPosition) {
             currentPosition = initialPosition;
         }
 
+        @Override
         public void move(
                 final double deltaLatDegrees,
                 final double deltaLonDegrees,
@@ -239,10 +257,12 @@ public class ItsStation implements AutoCloseable {
                     currentPosition.longitudeDegrees() + deltaLonDegrees);
         }
 
+        @Override
         public void setSpeed(double speedMetersPerSecond) {
             this.speedMetersPerSecond = speedMetersPerSecond;
         }
 
+        @Override
         public void setHeading(double headingDegreesFromNorth) {
             this.headingDegreesFromNorth = headingDegreesFromNorth;
         }
@@ -256,13 +276,60 @@ public class ItsStation implements AutoCloseable {
                     speedMetersPerSecond,
                     headingDegreesFromNorth);
         }
-
     }
 
-    public ItsStation(StationConfig config, LinkLayer linkLayer, Position initialPosition, int udpPort) throws SocketException {
-        position = new UpdatablePositionProvider(initialPosition);
+    private static class UpdatableGpsdPositionProvider extends GpsdClient implements UpdatablePositionProvider {
+
+        private Position currentPosition = null;
+
+        private double speedMetersPerSecond = 0;
+        private double headingDegreesFromNorth = 0;
+
+        public UpdatableGpsdPositionProvider(InetSocketAddress address) throws IOException {
+            super(address);
+            logger.debug("gpsd client initialized");
+        }
+
+        @Override
+        public void move(
+                final double deltaLatDegrees,
+                final double deltaLonDegrees,
+                final double deltaElevation) {
+            currentPosition = new Position(
+                    getLatestPosition().position().lattitudeDegrees() + deltaLatDegrees,
+                    getLatestPosition().position().longitudeDegrees() + deltaLonDegrees);
+        }
+
+        @Override
+        public void setSpeed(double speedMetersPerSecond) {
+            this.speedMetersPerSecond = speedMetersPerSecond;
+        }
+
+        @Override
+        public void setHeading(double headingDegreesFromNorth) {
+            this.headingDegreesFromNorth = headingDegreesFromNorth;
+        }
+
+        /** Returns GPSd position until the first move is called. after which it never asks gpsd. */
+        @Override public LongPositionVector getLatestPosition() {
+            logger.trace("position provider request to gpsd client with current position {}", currentPosition);
+            Optional<Address> emptyAddress = Optional.empty();
+            return (currentPosition == null) ? super.getLatestPosition() :
+                new LongPositionVector(emptyAddress,
+                    Instant.now(),
+                    currentPosition,
+                    true,
+                    speedMetersPerSecond,
+                    headingDegreesFromNorth);
+        }
+    }
+
+
+
+    public ItsStation(StationConfig config, LinkLayer linkLayer, UpdatablePositionProvider position, int udpPort, MacAddress macAddress) throws SocketException {
+        this.position = position;
         rcvSocket = new DatagramSocket(udpPort);
-        station = new GeonetStation(config, linkLayer, position);
+        station = new GeonetStation(config, linkLayer, position, macAddress);
         new Thread(station).start();
         station.startBecon();
         btpSocket = BtpSocket.on(station);
@@ -272,20 +339,20 @@ public class ItsStation implements AutoCloseable {
         scheduledExecutor.scheduleAtFixedRate(camSender, CAM_INITIAL_DELAY_MS, CAM_INTERVAL_MIN_MS, TimeUnit.MILLISECONDS);
     }
 
-    private void sendReply(Response message) throws IllegalArgumentException,
+    private void sendReply(Response message, InetAddress tsAddress, int tsPort) throws IllegalArgumentException,
             IllegalAccessException,
             IOException {
         logger.info("Sending message to TS: " + message);
         byte[] messageAsBytes = Parser.toBytes(message);
-        DatagramPacket replyPacket = new DatagramPacket(messageAsBytes, messageAsBytes.length);
-        replyPacket.setPort(defaultUpperTesterPort);
+        DatagramPacket replyPacket = new DatagramPacket(messageAsBytes, messageAsBytes.length,
+                tsAddress, tsPort);
         rcvSocket.send(replyPacket);
     }
 
     private void onCamReceived(byte[] cam) {
         logger.info("Got CAM");
         try {
-            sendReply(new CamEventIndication(cam));
+            sendReply(new CamEventIndication(cam), defaultTsAddress, defaultUpperTesterPort);
         } catch (IllegalArgumentException | IllegalAccessException | IOException e) {
             logger.warn("Failed to send CAM event indication", e);
         }
@@ -294,7 +361,7 @@ public class ItsStation implements AutoCloseable {
     private void onDenmReceived(byte[] denm) {
         logger.info("Got DENM");
         try {
-            sendReply(new DenmEventIndication(denm));
+            sendReply(new DenmEventIndication(denm), defaultTsAddress, defaultUpperTesterPort);
         } catch (IllegalArgumentException | IllegalAccessException | IOException e) {
             logger.warn("Failed to send DENM event indication", e);
         }
@@ -313,80 +380,86 @@ public class ItsStation implements AutoCloseable {
             Object message = new Parser()
                     .parse2(Arrays.copyOfRange(buffer, 0, receivePacket.getLength()));
 
+            int tsPort = receivePacket.getPort();
+            InetAddress tsAddress = receivePacket.getAddress();
             // All messages in one big SWITCH-like statement:
             // Part 1: Common Upper Tester Primitives.
             if (message instanceof Initialize) {
-                defaultUpperTesterPort = receivePacket.getPort();
                 logger.info("Set default UDP port to {}", defaultUpperTesterPort);
-                sendReply(new InitializeResult((byte) 0x01));
+                defaultUpperTesterPort = tsPort;
+                defaultTsAddress = tsAddress;
+                sendReply(new InitializeResult((byte) 0x01), tsAddress, tsPort);
             } else if (message instanceof ChangePosition) {
                 ChangePosition typedMessage = (ChangePosition) message;
                 position.move(
                         typedMessage.deltaLatitude * 0.1 * MICRODEGREE,
                         typedMessage.deltaLongitude * 0.1 * MICRODEGREE,
                         typedMessage.deltaElevation);
-                sendReply(new ChangePositionResult(REPLY_SUCCESS));
+                sendReply(new ChangePositionResult(REPLY_SUCCESS), tsAddress, tsPort);
             } else if (message instanceof ChangePseudonym) {
-                sendReply(new ChangePseudonymResult(REPLY_FAILURE));  // We don't have pseudonyms.
+                sendReply(new ChangePseudonymResult(REPLY_FAILURE), tsAddress, tsPort);  // We don't have pseudonyms.
             } // ...to be continued after the comments:
               // Part 2: CAM Upper Tester Primitives (not implemented yet)
             else if (message instanceof CamTriggerChangeCurvature) {
                 CamTriggerChangeCurvature typedMessage = (CamTriggerChangeCurvature) message;
-                vehicle.curvature = typedMessage.curvature;
-                sendReply(new CamTriggerResult(REPLY_SUCCESS));
+                vehicle.curvature += typedMessage.curvature;
+                sendReply(new CamTriggerResult(REPLY_SUCCESS), tsAddress, tsPort);
             } else if (message instanceof CamTriggerChangeSpeed) {
                 CamTriggerChangeSpeed typedMessage = (CamTriggerChangeSpeed) message;
+                logger.debug("change speed received by {} cm", typedMessage.speedVariation);
                 position.setSpeed(position.getLatestPosition().speedMetersPerSecond() + 0.01 * typedMessage.speedVariation);
-                sendReply(new CamTriggerResult(REPLY_SUCCESS));
+                sendReply(new CamTriggerResult(REPLY_SUCCESS), tsAddress, tsPort);
+                logger.debug("speed now {} m/s", position.getLatestPosition().speedMetersPerSecond());
             } else if (message instanceof CamTriggerSetAccelerationControlStatus) {
                 CamTriggerSetAccelerationControlStatus typedMessage = (CamTriggerSetAccelerationControlStatus) message;
                 vehicle.accelerationControlStatus = typedMessage.flags;
-                sendReply(new CamTriggerResult(REPLY_SUCCESS));
+                sendReply(new CamTriggerResult(REPLY_SUCCESS), tsAddress, tsPort);
             } else if (message instanceof CamTriggerSetExteriorLightsStatus) {
                 CamTriggerSetExteriorLightsStatus typedMessage = (CamTriggerSetExteriorLightsStatus) message;
                 vehicle.exteriorLightsStatus = typedMessage.flags;
-                sendReply(new CamTriggerResult(REPLY_SUCCESS));
+                sendReply(new CamTriggerResult(REPLY_SUCCESS), tsAddress, tsPort);
             } else if (message instanceof CamTriggerChangeHeading) {
                 CamTriggerChangeHeading typedMessage = (CamTriggerChangeHeading) message;
-                position.setHeading(0.1 * typedMessage.direction);
-                sendReply(new CamTriggerResult(REPLY_SUCCESS));
+                position.setHeading(position.getLatestPosition().headingDegreesFromNorth() + 0.1 * typedMessage.direction);
+                sendReply(new CamTriggerResult(REPLY_SUCCESS), tsAddress, tsPort);
             } else if (message instanceof CamTriggerSetDriveDirection) {
                 CamTriggerSetDriveDirection typedMessage = (CamTriggerSetDriveDirection) message;
                 vehicle.driveDirection = typedMessage.direction;
-                sendReply(new CamTriggerResult(REPLY_SUCCESS));
+                sendReply(new CamTriggerResult(REPLY_SUCCESS), tsAddress, tsPort);
             } else if (message instanceof CamTriggerChangeYawRate) {
                 CamTriggerChangeYawRate typedMessage = (CamTriggerChangeYawRate) message;
-                vehicle.yawRate = typedMessage.yawRate;
-                sendReply(new CamTriggerResult(REPLY_SUCCESS));
+                vehicle.yawRate += typedMessage.yawRate;
+                sendReply(new CamTriggerResult(REPLY_SUCCESS), tsAddress, tsPort);
             } else if (message instanceof CamTriggerSetStationType) {
                 CamTriggerSetStationType typedMessage = (CamTriggerSetStationType) message;
                 vehicle.stationType = typedMessage.stationType;
-                sendReply(new CamTriggerResult(REPLY_SUCCESS));
+                sendReply(new CamTriggerResult(REPLY_SUCCESS), tsAddress, tsPort);
             } else if (message instanceof CamTriggerSetVehicleRole) {
                 CamTriggerSetVehicleRole typedMessage = (CamTriggerSetVehicleRole) message;
                 vehicle.vehicleRole = typedMessage.vehicleRole;
-                sendReply(new CamTriggerResult(REPLY_SUCCESS));
+                logger.debug("Set vehicle role to {}", vehicle.vehicleRole);
+                sendReply(new CamTriggerResult(REPLY_SUCCESS), tsAddress, tsPort);
             } else if (message instanceof CamTriggerSetEmbarkationStatus) {
                 CamTriggerSetEmbarkationStatus typedMessage = (CamTriggerSetEmbarkationStatus) message;
                 vehicle.embarkationStatus = typedMessage.embarkationStatus != 0;  // 0=false, 255=true
-                sendReply(new CamTriggerResult(REPLY_SUCCESS));
+                sendReply(new CamTriggerResult(REPLY_SUCCESS), tsAddress, tsPort);
             } else if (message instanceof CamTriggerSetPtActivation) {
                 CamTriggerSetPtActivation typedMessage = (CamTriggerSetPtActivation) message;
                 vehicle.ptActivationType = typedMessage.ptActiavtionType;
                 vehicle.ptActivationData = typedMessage.ptActivationData.clone();
-                sendReply(new CamTriggerResult(REPLY_SUCCESS));
+                sendReply(new CamTriggerResult(REPLY_SUCCESS), tsAddress, tsPort);
             } else if (message instanceof CamTriggerSetDangerousGoods) {
                 CamTriggerSetDangerousGoods typedMessage = (CamTriggerSetDangerousGoods) message;
                 vehicle.dangerousGoods = typedMessage.dangerousGood;
-                sendReply(new CamTriggerResult(REPLY_SUCCESS));
+                sendReply(new CamTriggerResult(REPLY_SUCCESS), tsAddress, tsPort);
             } else if (message instanceof CamTriggerSetDangerousGoodsExt) {
                 CamTriggerSetDangerousGoodsExt typedMessage = (CamTriggerSetDangerousGoodsExt) message;
                 vehicle.dangerousGoodExt = typedMessage.dangerousGoodExt;
-                sendReply(new CamTriggerResult(REPLY_SUCCESS));
+                sendReply(new CamTriggerResult(REPLY_SUCCESS), tsAddress, tsPort);
             } else if (message instanceof CamTriggerSetLightBarSiren) {
                 CamTriggerSetLightBarSiren typedMessage = (CamTriggerSetLightBarSiren) message;
                 vehicle.lightBarSiren = typedMessage.flags;
-                sendReply(new CamTriggerResult(REPLY_SUCCESS));
+                sendReply(new CamTriggerResult(REPLY_SUCCESS), tsAddress, tsPort);
             }  // ...continued after comment
               // Part 3: DENM Upper Tester Primitives (not implemented yet)
               // Part 4: GeoNetworking Upper Tester Primitives
@@ -402,7 +475,7 @@ public class ItsStation implements AutoCloseable {
                         typedMessage.distanceB,
                         typedMessage.angle,
                         typedMessage.payload,
-                        true)));
+                        true)), tsAddress, tsPort);
             } else if (message instanceof GnTriggerGeoBroadcast) {
                 GnTriggerGeoBroadcast typedMessage = (GnTriggerGeoBroadcast) message;
                 sendReply(new GnTriggerResult(sendAreaCast(
@@ -415,7 +488,7 @@ public class ItsStation implements AutoCloseable {
                         typedMessage.distanceB,
                         typedMessage.angle,
                         typedMessage.payload,
-                        false)));
+                        false)), tsAddress, tsPort);
             } else if (message instanceof GnTriggerSHB) {
                 GnTriggerSHB typedMessage = (GnTriggerSHB) message;
                 Optional<LongPositionVector> sender = Optional.empty();
@@ -426,11 +499,11 @@ public class ItsStation implements AutoCloseable {
                         sender,
                         typedMessage.payload);
                 station.send(data);
-                sendReply(new GnTriggerResult(REPLY_SUCCESS));
+                sendReply(new GnTriggerResult(REPLY_SUCCESS), tsAddress, tsPort);
             } else if (message instanceof GnTriggerTSB) {
-                sendReply(new GnTriggerResult(REPLY_FAILURE));
+                sendReply(new GnTriggerResult(REPLY_FAILURE), tsAddress, tsPort);
             } else if (message instanceof GnTriggerGeoUnicast) {
-                sendReply(new GnTriggerResult(REPLY_FAILURE));
+                sendReply(new GnTriggerResult(REPLY_FAILURE), tsAddress, tsPort);
             } // ...to be continued after the comments:
               // Part 5: IPv6OverGeoNetworking Upper Tester Primitives (not supported)
               // Part 6: BTP Upper Tester Primitives
@@ -438,12 +511,12 @@ public class ItsStation implements AutoCloseable {
                 BtpTriggerA typedMessage = (BtpTriggerA) message;
                 btpSocket.send(BtpPacket.singleHopEmptyA(typedMessage.destinationPort,
                         typedMessage.sourcePort));
-                sendReply(new BtpTriggerResult(REPLY_SUCCESS));
+                sendReply(new BtpTriggerResult(REPLY_SUCCESS), tsAddress, tsPort);
             } else if (message instanceof BtpTriggerB) {
                 BtpTriggerB typedMessage = (BtpTriggerB) message;
                 btpSocket.send(BtpPacket.singleHopEmptyB(typedMessage.destinationPort,
                         typedMessage.destinationPortInfo));
-                sendReply(new BtpTriggerResult(REPLY_SUCCESS));
+                sendReply(new BtpTriggerResult(REPLY_SUCCESS), tsAddress, tsPort);
             } else {
                 logger.warn("Unhandled message of type " + message.getClass());
             }
@@ -465,7 +538,7 @@ public class ItsStation implements AutoCloseable {
         Position center = new Position(latE7 * 0.1 * MICRODEGREE, lonE7 * 0.1 * MICRODEGREE);
 
         Area area =
-                shape == 0 ? Area.circle(center, (distanceA + distanceB) / 2.0) :
+                shape == 0 ? Area.circle(center, distanceA) :  // in Circle distanceA is radius and distanceB is zero.
                         shape == 1 ? Area.rectangle(center, distanceA, distanceB, angle) :
                                 shape == 2 ? Area.ellipse(center, distanceA, distanceB, angle) :
                                         null;
@@ -543,6 +616,7 @@ public class ItsStation implements AutoCloseable {
             if (withLowFreq && vehicleRole != 0) {
                 switch (vehicleRole) {
                     case 1:
+                        logger.debug("Public Transport CAM!");
                         specialVehicleContainer = new SpecialVehicleContainer(
                                 new PublicTransportContainer(
                                         embarkationStatus,
@@ -656,9 +730,10 @@ public class ItsStation implements AutoCloseable {
     }
 
     private static interface CliOptions {
-        @Option double getLat();
 
-        @Option double getLon();
+        @Option(defaultValue="57.0") double getLat();
+
+        @Option(defaultValue="13.0") double getLon();
 
         @Option SocketAddressFromString getRemoteAddressForUdpLinkLayer();
 
@@ -667,19 +742,31 @@ public class ItsStation implements AutoCloseable {
         @Option int getUpperTesterUdpPort();
 
         @Option(helpRequest = true) boolean getHelp();
+
+        @Option boolean hasEthernetHeader();
+
+        @Option SocketAddressFromString getGpsdServerAddress();
+
+        boolean isGpsdServerAddress();
+
     }
 
     public static void main(final String[] args) throws InstantiationException, IllegalAccessException, IOException {
         try {
             CliOptions opts = CliFactory.parseArguments(CliOptions.class, args);
             StationConfig config = new StationConfig();
-            boolean hasEthernetHeader = false;
+            boolean hasEthernetHeader = true; //opts.hasEthernetHeader();  // TODO
+            MacAddress senderMac = new MacAddress(0x00_0C_42_69_9f_aeL);  // TODO
             LinkLayer linkLayer = new LinkLayerUdpToEthernet(
                     opts.getLocalPortForUdpLinkLayer(),
                     opts.getRemoteAddressForUdpLinkLayer().asInetSocketAddress(),
                     hasEthernetHeader);
-            Position position = new Position(opts.getLat(), opts.getLon());
-            try (ItsStation sut = new ItsStation(config, linkLayer, position, opts.getUpperTesterUdpPort())) {
+            UpdatablePositionProvider positionProvider =
+                    opts.isGpsdServerAddress() ?
+                        new UpdatableGpsdPositionProvider(opts.getGpsdServerAddress().asInetSocketAddress()) :
+                        new StaticUpdatablePositionProvider(new Position(opts.getLat(), opts.getLon()));
+            try (ItsStation sut = new ItsStation(config, linkLayer, positionProvider,
+                    opts.getUpperTesterUdpPort(), senderMac)) {
                 sut.run();  // Infinite loop.
             }
         } catch (ArgumentValidationException e) {
