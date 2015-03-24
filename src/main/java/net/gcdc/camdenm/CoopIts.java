@@ -1447,7 +1447,13 @@ public class CoopIts {
         @Asn1Optional TransmissionInterval transmissionInterval;
         StationType stationType;
 
-        protected ManagementContainer() {}
+        protected ManagementContainer() {
+            this.actionID = new ActionID();
+            this.detectionTime = new TimestampIts();
+            this.referenceTime = new TimestampIts();
+            this.eventPosition = new ReferencePosition();
+            this.stationType = new StationType();
+        }
 
         public static Builder builder() { return new Builder(); }
 
