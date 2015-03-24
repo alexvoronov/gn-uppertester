@@ -10,7 +10,6 @@ import java.util.Arrays;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 
 import net.gcdc.camdenm.CoopIts.AccelerationControl;
 import net.gcdc.camdenm.CoopIts.Altitude;
@@ -27,6 +26,7 @@ import net.gcdc.camdenm.CoopIts.CurvatureConfidence;
 import net.gcdc.camdenm.CoopIts.CurvatureValue;
 import net.gcdc.camdenm.CoopIts.DangerousGoodsBasic;
 import net.gcdc.camdenm.CoopIts.DangerousGoodsContainer;
+import net.gcdc.camdenm.CoopIts.Denm;
 import net.gcdc.camdenm.CoopIts.DriveDirection;
 import net.gcdc.camdenm.CoopIts.EmergencyContainer;
 import net.gcdc.camdenm.CoopIts.ExteriorLights;
@@ -69,6 +69,7 @@ import net.gcdc.geonetworking.Area;
 import net.gcdc.geonetworking.BtpPacket;
 import net.gcdc.geonetworking.BtpSocket;
 import net.gcdc.geonetworking.Destination;
+import net.gcdc.geonetworking.Destination.Geobroadcast;
 import net.gcdc.geonetworking.GeonetData;
 import net.gcdc.geonetworking.GeonetDataListener;
 import net.gcdc.geonetworking.GeonetStation;
@@ -141,7 +142,7 @@ public class ItsStation implements AutoCloseable {
         @Override public void onGeonetDataReceived(GeonetData indication) {
             try {
                 sendReply(new GnEventIndication(indication.payload), defaultTsAddress, defaultUpperTesterPort);
-            } catch (IllegalArgumentException | IllegalAccessException | IOException e) {
+            } catch (IllegalArgumentException e) {
                 logger.warn("Failed to send unsolicited GN indication to the TestSystem", e);
             }
         }
@@ -149,9 +150,8 @@ public class ItsStation implements AutoCloseable {
 
     private final Runnable btpListener = new Runnable() {
         @Override public void run() {
-            try {
-                while(true) {
-
+            while(true) {
+                try {
                     BtpPacket btpPacket = btpSocket.receive();
                     logger.debug("Sending BTP event indication");
                     sendReply(new BtpEventIndication(btpPacket.payload()), defaultTsAddress, defaultUpperTesterPort);
@@ -160,11 +160,11 @@ public class ItsStation implements AutoCloseable {
                         case PORT_DENM: onDenmReceived(btpPacket.payload()); break;
                         default: logger.info("Message for unsupported BTP port {}", btpPacket.destinationPort());
                     }
-                }
-            } catch (InterruptedException | IllegalArgumentException | IllegalAccessException
-                    | IOException e) {
-                logger.warn("Failed to receive+send unsolicited BTP indication to the TestSystem",
+
+                } catch (InterruptedException | IllegalArgumentException e) {
+                    logger.warn("Failed to receive+send unsolicited BTP indication to the TestSystem",
                         e);
+                }
             }
         }
     };
@@ -225,6 +225,23 @@ public class ItsStation implements AutoCloseable {
             }
         }
     };
+
+    private void send(Denm denm, Geobroadcast destination) {
+        logger.info("attempt to send DENM");
+        try {
+            byte[] bytes = UperEncoder.encode(denm);
+            logger.info("bytes encoded ", bytes);
+            BtpPacket packet = BtpPacket.customDestination(bytes, PORT_DENM, destination);
+            logger.info("sending DENM as BTP packet {} ", packet);
+            btpSocket.send(packet);
+            logger.debug("btp packet sent with no exception ", packet);
+        } catch (IllegalArgumentException | IllegalAccessException e) {
+            logger.error("Failed to encode DENM", e);
+        } catch (IOException e) {
+            logger.error("Failed to send DENM", e);
+        }
+
+    }
 
     private final UpdatablePositionProvider position;
 
@@ -326,9 +343,17 @@ public class ItsStation implements AutoCloseable {
 
 
 
-    public ItsStation(StationConfig config, LinkLayer linkLayer, UpdatablePositionProvider position, int udpPort, MacAddress macAddress) throws SocketException {
+    public ItsStation(StationConfig config, LinkLayer linkLayer, UpdatablePositionProvider position, int udpPort, MacAddress macAddress) {
         this.position = position;
-        rcvSocket = new DatagramSocket(udpPort);
+        DatagramSocket socket = null;
+        try {
+            socket = new DatagramSocket(udpPort);
+        } catch (SocketException e) {
+            logger.error("Unable to open socket for UT communication", e);
+            System.exit(1);
+        } finally {
+            rcvSocket = socket;
+        }
         station = new GeonetStation(config, linkLayer, position, macAddress);
         new Thread(station).start();
         station.startBecon();
@@ -336,24 +361,31 @@ public class ItsStation implements AutoCloseable {
         station.addGeonetDataListener(gnListener);
         executor.submit(btpListener);
         vehicle = new Vehicle(position);
-        scheduledExecutor.scheduleAtFixedRate(camSender, CAM_INITIAL_DELAY_MS, CAM_INTERVAL_MIN_MS, TimeUnit.MILLISECONDS);
+        //scheduledExecutor.scheduleAtFixedRate(camSender, CAM_INITIAL_DELAY_MS, CAM_INTERVAL_MIN_MS, TimeUnit.MILLISECONDS);
     }
 
-    private void sendReply(Response message, InetAddress tsAddress, int tsPort) throws IllegalArgumentException,
-            IllegalAccessException,
-            IOException {
-        logger.info("Sending message to TS: " + message);
-        byte[] messageAsBytes = Parser.toBytes(message);
-        DatagramPacket replyPacket = new DatagramPacket(messageAsBytes, messageAsBytes.length,
-                tsAddress, tsPort);
-        rcvSocket.send(replyPacket);
+    private void sendReply(Response message, InetAddress tsAddress, int tsPort) {
+        logger.info((tsAddress == null ? "Skip " : "") + "Sending message to TS: " + message);
+        if (tsAddress != null) {
+            byte[] messageAsBytes;
+            try {
+                messageAsBytes = Parser.toBytes(message);
+                DatagramPacket replyPacket = new DatagramPacket(messageAsBytes, messageAsBytes.length,
+                        tsAddress, tsPort);
+                rcvSocket.send(replyPacket);
+            } catch (IllegalArgumentException | IllegalAccessException e) {
+                logger.warn("Failed to encode {}", message, e);
+            } catch (IOException e) {
+                logger.warn("Failed to send reply packet to UT");
+            }
+        }
     }
 
     private void onCamReceived(byte[] cam) {
         logger.info("Got CAM");
         try {
             sendReply(new CamEventIndication(cam), defaultTsAddress, defaultUpperTesterPort);
-        } catch (IllegalArgumentException | IllegalAccessException | IOException e) {
+        } catch (IllegalArgumentException e) {
             logger.warn("Failed to send CAM event indication", e);
         }
     }
@@ -362,12 +394,12 @@ public class ItsStation implements AutoCloseable {
         logger.info("Got DENM");
         try {
             sendReply(new DenmEventIndication(denm), defaultTsAddress, defaultUpperTesterPort);
-        } catch (IllegalArgumentException | IllegalAccessException | IOException e) {
+        } catch (IllegalArgumentException e) {
             logger.warn("Failed to send DENM event indication", e);
         }
     }
 
-    public void run() throws IOException, InstantiationException, IllegalAccessException {
+    public void run() {
 
         byte[] buffer = new byte[65535];
         DatagramPacket receivePacket = new DatagramPacket(buffer, buffer.length);
@@ -375,97 +407,116 @@ public class ItsStation implements AutoCloseable {
         while (true) {
 
             logger.debug("Waiting for packet");
-            rcvSocket.receive(receivePacket);
+            try {
+                rcvSocket.receive(receivePacket);
+            } catch (IOException e1) {
+                logger.error("Failed to receive packet from Upper Tester", e1);
+                System.exit(1);
+            }
 
-            Object message = new Parser()
-                    .parse2(Arrays.copyOfRange(buffer, 0, receivePacket.getLength()));
+            Object message;
+            try {
+                message = new Parser()
+                        .parse2(Arrays.copyOfRange(buffer, 0, receivePacket.getLength()));
+                InetAddress tsAddress = receivePacket.getAddress();
+                int tsPort = receivePacket.getPort();
+                Response response = processMessage(message, tsAddress, tsPort);
+                if (response != null) {
+                    sendReply(response, tsAddress, tsPort);
+                }
+            } catch (InstantiationException | IllegalAccessException e1) {
+                logger.warn("Failed to parse {}", buffer);
+            } catch (IOException e) {
+                logger.error("Failed to process Upper Tester trigger", e);
+            }
+        }
+    }
 
-            int tsPort = receivePacket.getPort();
-            InetAddress tsAddress = receivePacket.getAddress();
+    public Response processMessage(Object message, InetAddress tsAddress, int tsPort) throws IOException {
             // All messages in one big SWITCH-like statement:
             // Part 1: Common Upper Tester Primitives.
             if (message instanceof Initialize) {
                 logger.info("Set default UDP port to {}", defaultUpperTesterPort);
                 defaultUpperTesterPort = tsPort;
                 defaultTsAddress = tsAddress;
-                sendReply(new InitializeResult((byte) 0x01), tsAddress, tsPort);
+                return new InitializeResult((byte) 0x01);
             } else if (message instanceof ChangePosition) {
                 ChangePosition typedMessage = (ChangePosition) message;
                 position.move(
                         typedMessage.deltaLatitude * 0.1 * MICRODEGREE,
                         typedMessage.deltaLongitude * 0.1 * MICRODEGREE,
                         typedMessage.deltaElevation);
-                sendReply(new ChangePositionResult(REPLY_SUCCESS), tsAddress, tsPort);
+                return (new ChangePositionResult(REPLY_SUCCESS));
             } else if (message instanceof ChangePseudonym) {
-                sendReply(new ChangePseudonymResult(REPLY_FAILURE), tsAddress, tsPort);  // We don't have pseudonyms.
+                return(new ChangePseudonymResult(REPLY_FAILURE));  // We don't have pseudonyms.
             } // ...to be continued after the comments:
               // Part 2: CAM Upper Tester Primitives (not implemented yet)
             else if (message instanceof CamTriggerChangeCurvature) {
                 CamTriggerChangeCurvature typedMessage = (CamTriggerChangeCurvature) message;
                 vehicle.curvature += typedMessage.curvature;
-                sendReply(new CamTriggerResult(REPLY_SUCCESS), tsAddress, tsPort);
+                return(new CamTriggerResult(REPLY_SUCCESS));
             } else if (message instanceof CamTriggerChangeSpeed) {
                 CamTriggerChangeSpeed typedMessage = (CamTriggerChangeSpeed) message;
                 logger.debug("change speed received by {} cm", typedMessage.speedVariation);
                 position.setSpeed(position.getLatestPosition().speedMetersPerSecond() + 0.01 * typedMessage.speedVariation);
-                sendReply(new CamTriggerResult(REPLY_SUCCESS), tsAddress, tsPort);
                 logger.debug("speed now {} m/s", position.getLatestPosition().speedMetersPerSecond());
+                return(new CamTriggerResult(REPLY_SUCCESS));
             } else if (message instanceof CamTriggerSetAccelerationControlStatus) {
                 CamTriggerSetAccelerationControlStatus typedMessage = (CamTriggerSetAccelerationControlStatus) message;
                 vehicle.accelerationControlStatus = typedMessage.flags;
-                sendReply(new CamTriggerResult(REPLY_SUCCESS), tsAddress, tsPort);
+                return(new CamTriggerResult(REPLY_SUCCESS));
             } else if (message instanceof CamTriggerSetExteriorLightsStatus) {
                 CamTriggerSetExteriorLightsStatus typedMessage = (CamTriggerSetExteriorLightsStatus) message;
                 vehicle.exteriorLightsStatus = typedMessage.flags;
-                sendReply(new CamTriggerResult(REPLY_SUCCESS), tsAddress, tsPort);
+                return(new CamTriggerResult(REPLY_SUCCESS));
             } else if (message instanceof CamTriggerChangeHeading) {
                 CamTriggerChangeHeading typedMessage = (CamTriggerChangeHeading) message;
                 position.setHeading(position.getLatestPosition().headingDegreesFromNorth() + 0.1 * typedMessage.direction);
-                sendReply(new CamTriggerResult(REPLY_SUCCESS), tsAddress, tsPort);
+                return(new CamTriggerResult(REPLY_SUCCESS));
             } else if (message instanceof CamTriggerSetDriveDirection) {
                 CamTriggerSetDriveDirection typedMessage = (CamTriggerSetDriveDirection) message;
                 vehicle.driveDirection = typedMessage.direction;
-                sendReply(new CamTriggerResult(REPLY_SUCCESS), tsAddress, tsPort);
+                return(new CamTriggerResult(REPLY_SUCCESS));
             } else if (message instanceof CamTriggerChangeYawRate) {
                 CamTriggerChangeYawRate typedMessage = (CamTriggerChangeYawRate) message;
                 vehicle.yawRate += typedMessage.yawRate;
-                sendReply(new CamTriggerResult(REPLY_SUCCESS), tsAddress, tsPort);
+                return(new CamTriggerResult(REPLY_SUCCESS));
             } else if (message instanceof CamTriggerSetStationType) {
                 CamTriggerSetStationType typedMessage = (CamTriggerSetStationType) message;
                 vehicle.stationType = typedMessage.stationType;
-                sendReply(new CamTriggerResult(REPLY_SUCCESS), tsAddress, tsPort);
+                return(new CamTriggerResult(REPLY_SUCCESS));
             } else if (message instanceof CamTriggerSetVehicleRole) {
                 CamTriggerSetVehicleRole typedMessage = (CamTriggerSetVehicleRole) message;
                 vehicle.vehicleRole = typedMessage.vehicleRole;
                 logger.debug("Set vehicle role to {}", vehicle.vehicleRole);
-                sendReply(new CamTriggerResult(REPLY_SUCCESS), tsAddress, tsPort);
+                return(new CamTriggerResult(REPLY_SUCCESS));
             } else if (message instanceof CamTriggerSetEmbarkationStatus) {
                 CamTriggerSetEmbarkationStatus typedMessage = (CamTriggerSetEmbarkationStatus) message;
                 vehicle.embarkationStatus = typedMessage.embarkationStatus != 0;  // 0=false, 255=true
-                sendReply(new CamTriggerResult(REPLY_SUCCESS), tsAddress, tsPort);
+                return(new CamTriggerResult(REPLY_SUCCESS));
             } else if (message instanceof CamTriggerSetPtActivation) {
                 CamTriggerSetPtActivation typedMessage = (CamTriggerSetPtActivation) message;
                 vehicle.ptActivationType = typedMessage.ptActiavtionType;
                 vehicle.ptActivationData = typedMessage.ptActivationData.clone();
-                sendReply(new CamTriggerResult(REPLY_SUCCESS), tsAddress, tsPort);
+                return(new CamTriggerResult(REPLY_SUCCESS));
             } else if (message instanceof CamTriggerSetDangerousGoods) {
                 CamTriggerSetDangerousGoods typedMessage = (CamTriggerSetDangerousGoods) message;
                 vehicle.dangerousGoods = typedMessage.dangerousGood;
-                sendReply(new CamTriggerResult(REPLY_SUCCESS), tsAddress, tsPort);
+                return(new CamTriggerResult(REPLY_SUCCESS));
             } else if (message instanceof CamTriggerSetDangerousGoodsExt) {
                 CamTriggerSetDangerousGoodsExt typedMessage = (CamTriggerSetDangerousGoodsExt) message;
                 vehicle.dangerousGoodExt = typedMessage.dangerousGoodExt;
-                sendReply(new CamTriggerResult(REPLY_SUCCESS), tsAddress, tsPort);
+                return(new CamTriggerResult(REPLY_SUCCESS));
             } else if (message instanceof CamTriggerSetLightBarSiren) {
                 CamTriggerSetLightBarSiren typedMessage = (CamTriggerSetLightBarSiren) message;
                 vehicle.lightBarSiren = typedMessage.flags;
-                sendReply(new CamTriggerResult(REPLY_SUCCESS), tsAddress, tsPort);
+                return(new CamTriggerResult(REPLY_SUCCESS));
             }  // ...continued after comment
               // Part 3: DENM Upper Tester Primitives (not implemented yet)
               // Part 4: GeoNetworking Upper Tester Primitives
             else if (message instanceof GnTriggerGeoAnycast) {
                 GnTriggerGeoAnycast typedMessage = (GnTriggerGeoAnycast) message;
-                sendReply(new GnTriggerResult(sendAreaCast(
+                return(new GnTriggerResult(sendAreaCast(
                         typedMessage.shape,
                         typedMessage.lifetime,
                         typedMessage.trafficClass,
@@ -475,10 +526,10 @@ public class ItsStation implements AutoCloseable {
                         typedMessage.distanceB,
                         typedMessage.angle,
                         typedMessage.payload,
-                        true)), tsAddress, tsPort);
+                        true)));
             } else if (message instanceof GnTriggerGeoBroadcast) {
                 GnTriggerGeoBroadcast typedMessage = (GnTriggerGeoBroadcast) message;
-                sendReply(new GnTriggerResult(sendAreaCast(
+                return (new GnTriggerResult(sendAreaCast(
                         typedMessage.shape,
                         typedMessage.lifetime,
                         typedMessage.trafficClass,
@@ -488,7 +539,7 @@ public class ItsStation implements AutoCloseable {
                         typedMessage.distanceB,
                         typedMessage.angle,
                         typedMessage.payload,
-                        false)), tsAddress, tsPort);
+                        false)));
             } else if (message instanceof GnTriggerSHB) {
                 GnTriggerSHB typedMessage = (GnTriggerSHB) message;
                 Optional<LongPositionVector> sender = Optional.empty();
@@ -499,11 +550,11 @@ public class ItsStation implements AutoCloseable {
                         sender,
                         typedMessage.payload);
                 station.send(data);
-                sendReply(new GnTriggerResult(REPLY_SUCCESS), tsAddress, tsPort);
+                return(new GnTriggerResult(REPLY_SUCCESS));
             } else if (message instanceof GnTriggerTSB) {
-                sendReply(new GnTriggerResult(REPLY_FAILURE), tsAddress, tsPort);
+                return(new GnTriggerResult(REPLY_FAILURE));
             } else if (message instanceof GnTriggerGeoUnicast) {
-                sendReply(new GnTriggerResult(REPLY_FAILURE), tsAddress, tsPort);
+                return(new GnTriggerResult(REPLY_FAILURE));
             } // ...to be continued after the comments:
               // Part 5: IPv6OverGeoNetworking Upper Tester Primitives (not supported)
               // Part 6: BTP Upper Tester Primitives
@@ -511,17 +562,18 @@ public class ItsStation implements AutoCloseable {
                 BtpTriggerA typedMessage = (BtpTriggerA) message;
                 btpSocket.send(BtpPacket.singleHopEmptyA(typedMessage.destinationPort,
                         typedMessage.sourcePort));
-                sendReply(new BtpTriggerResult(REPLY_SUCCESS), tsAddress, tsPort);
+                return(new BtpTriggerResult(REPLY_SUCCESS));
             } else if (message instanceof BtpTriggerB) {
                 BtpTriggerB typedMessage = (BtpTriggerB) message;
                 btpSocket.send(BtpPacket.singleHopEmptyB(typedMessage.destinationPort,
                         typedMessage.destinationPortInfo));
-                sendReply(new BtpTriggerResult(REPLY_SUCCESS), tsAddress, tsPort);
+                return(new BtpTriggerResult(REPLY_SUCCESS));
             } else {
                 logger.warn("Unhandled message of type " + message.getClass());
+                return null;
             }
         }
-    }
+
 
     private byte sendAreaCast(
             byte shape,
@@ -533,7 +585,7 @@ public class ItsStation implements AutoCloseable {
             short distanceB,
             short angle,
             byte[] payload,
-            boolean isAnycast) throws IOException {
+            boolean isAnycast) {
 
         Position center = new Position(latE7 * 0.1 * MICRODEGREE, lonE7 * 0.1 * MICRODEGREE);
 
@@ -560,7 +612,11 @@ public class ItsStation implements AutoCloseable {
                 sender,
                 payload);
 
-        station.send(data);
+        try {
+            station.send(data);
+        } catch (IOException e) {
+            logger.error("Failed to send Areacast", e);
+        }
 
         return REPLY_SUCCESS;
     }
@@ -582,7 +638,7 @@ public class ItsStation implements AutoCloseable {
         byte driveDirection;
         int yawRate;
         byte stationType;
-        byte vehicleRole;
+        byte vehicleRole = 2;
         boolean embarkationStatus;
         byte dangerousGoods;
         byte dangerousGoodExt;
@@ -591,6 +647,10 @@ public class ItsStation implements AutoCloseable {
         byte[] ptActivationData;
 
         public Vehicle(PositionProvider positionProvider) {
+        }
+
+        public Denm getDenm() {
+            return new Denm();
         }
 
         public Cam getCam(boolean withLowFreq, int genDeltaTimeMillis, LongPositionVector lpv) {
@@ -751,22 +811,107 @@ public class ItsStation implements AutoCloseable {
 
     }
 
+    private Geobroadcast dst_cfg_02() {
+        Position p = position.getLatestPosition().position();
+        return Destination.geobroadcast(Area.ellipse(
+                new Position(p.lattitudeDegrees() - 0.0001, p.longitudeDegrees() - 0.0001),
+                200,
+                100,
+                90));
+    }
+
+    private Geobroadcast dst_cfg_04() {
+        Position p = position.getLatestPosition().position();
+        return Destination.geobroadcast(Area.ellipse(
+                new Position(p.lattitudeDegrees(), p.longitudeDegrees()),
+                100,
+                20,
+                0));
+    }
+
+    private Geobroadcast dst_cfg_08() {
+        Position p = position.getLatestPosition().position();
+        return Destination.geobroadcast(Area.ellipse(
+                new Position(p.lattitudeDegrees() + 0.0002690677, p.longitudeDegrees() + 0.0013956455),
+                100,
+                20,
+                10));
+    }
+
+    private Geobroadcast dst_cfg_08b() {
+        Position p = position.getLatestPosition().position();
+        return Destination.geobroadcast(Area.ellipse(
+                new Position(p.lattitudeDegrees() + 0.0002690677, p.longitudeDegrees() + 0.0013956455),
+                100,
+                20,
+                10));
+    }
+
+    private Geobroadcast dst_cfg_08c() {
+        Position p = position.getLatestPosition().position();
+        return Destination.geobroadcast(Area.ellipse(
+                new Position(p.lattitudeDegrees() + 0.0002690677, p.longitudeDegrees() + 0.0013956455),
+                100,
+                20,
+                10));
+    }
+
+    private Geobroadcast dst_cfg_09b() {
+        Position p = position.getLatestPosition().position();
+        return Destination.geobroadcast(Area.ellipse(
+                new Position(p.lattitudeDegrees() + 0.0002690677, p.longitudeDegrees() + 0.0013956455),
+                100,
+                20,
+                10));
+    }
+
+    private Geobroadcast dst_cfg_10() {
+        Position p = position.getLatestPosition().position();
+        return Destination.geobroadcast(Area.rectangle(
+                new Position(p.lattitudeDegrees() - 0.0001, p.longitudeDegrees() - 0.0001),
+                200,
+                100,
+                90));
+    }
+
+    private Geobroadcast dst_cfg_11() {
+        Position p = position.getLatestPosition().position();
+        return Destination.geobroadcast(Area.rectangle(
+                new Position(p.lattitudeDegrees(), p.longitudeDegrees()),
+                100,
+                20,
+                0));
+    }
+
+
     public static void main(final String[] args) throws InstantiationException, IllegalAccessException, IOException {
         try {
             CliOptions opts = CliFactory.parseArguments(CliOptions.class, args);
             StationConfig config = new StationConfig();
             boolean hasEthernetHeader = true; //opts.hasEthernetHeader();  // TODO
-            MacAddress senderMac = new MacAddress(0x00_0C_42_69_9f_aeL);  // TODO
+            //MacAddress senderMac = new MacAddress(0x00_0C_42_69_9f_aeL);  // TODO
+            MacAddress senderMac = new MacAddress(0x00_0C_42_69_9f_ccL);  // TODO
             LinkLayer linkLayer = new LinkLayerUdpToEthernet(
                     opts.getLocalPortForUdpLinkLayer(),
                     opts.getRemoteAddressForUdpLinkLayer().asInetSocketAddress(),
                     hasEthernetHeader);
-            UpdatablePositionProvider positionProvider =
+            final UpdatablePositionProvider positionProvider =
                     opts.isGpsdServerAddress() ?
                         new UpdatableGpsdPositionProvider(opts.getGpsdServerAddress().asInetSocketAddress()) :
                         new StaticUpdatablePositionProvider(new Position(opts.getLat(), opts.getLon()));
+
             try (ItsStation sut = new ItsStation(config, linkLayer, positionProvider,
                     opts.getUpperTesterUdpPort(), senderMac)) {
+//                sut.scheduledExecutor.scheduleAtFixedRate(new Runnable() {
+//                    @Override public void run() { sut.send(new Denm(), sut.dst_cfg_02()); }
+//                }, 2, 5, TimeUnit.SECONDS);
+//                sut.scheduledExecutor.scheduleAtFixedRate(new Runnable() {
+//                    @Override public void run() { sut.send(new Denm(), sut.dst_cfg_02()); }
+//                }, 9, 5, TimeUnit.SECONDS);
+//                sut.scheduledExecutor.scheduleAtFixedRate(new Runnable() {
+//                    @Override public void run() { sut.send(new Denm(), sut.dst_cfg_08b()); }
+//                }, 10, 5, TimeUnit.SECONDS);
+                //sut.executor.submit(sut);
                 sut.run();  // Infinite loop.
             }
         } catch (ArgumentValidationException e) {
