@@ -8,7 +8,7 @@ This is an Upper Tester Application for [geonetworking](https://github.com/alexv
 ```
 git clone https://github.com/alexvoronov/geonetworking.git
 cd geonetworking
-mvn install
+mvn clean install
 ```
 
 Geonetworking library requires a separate Link Layer entity, you can use e.g. [utoepy](https://github.com/alexvoronov/utoepy).
@@ -25,6 +25,12 @@ Then start Upper Tester Application. Example here uses geographical coordinates 
 
 ```
 mvn exec:java -Dexec.mainClass="net.gcdc.uppertester.ItsStation" -Dexec.args="--lat 57 --lon 13 --localPortForUdpLinkLayer 4001 --remoteAddressForUdpLinkLayer 127.0.0.1:4000 --upperTesterUdpPort 1600"
+```
+
+Here's another example:
+
+```
+mvn clean compile exec:java -Dexec.mainClass="net.gcdc.uppertester.ItsStation" -Dexec.args="--localPortForUdpLinkLayer 1237 --remoteAddressForUdpLinkLayer 192.168.159.102:1235 --upperTesterUdpPort 1600 --hasEthernetHeader --gpsdServerAddress 10.200.0.3:1944"
 ```
 
 ### Acknowledgements
