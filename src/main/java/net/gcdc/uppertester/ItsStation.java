@@ -10,6 +10,7 @@ import java.util.Arrays;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 import net.gcdc.camdenm.CoopIts.AccelerationControl;
 import net.gcdc.camdenm.CoopIts.Altitude;
@@ -343,7 +344,7 @@ public class ItsStation implements AutoCloseable {
 
 
 
-    public ItsStation(StationConfig config, LinkLayer linkLayer, UpdatablePositionProvider position, int udpPort, MacAddress macAddress) {
+    public ItsStation(StationConfig config, LinkLayer linkLayer, UpdatablePositionProvider position, int udpPort, MacAddress macAddress, boolean withCAM) {
         this.position = position;
         DatagramSocket socket = null;
         try {
@@ -361,7 +362,9 @@ public class ItsStation implements AutoCloseable {
         station.addGeonetDataListener(gnListener);
         executor.submit(btpListener);
         vehicle = new Vehicle(position);
-        //scheduledExecutor.scheduleAtFixedRate(camSender, CAM_INITIAL_DELAY_MS, CAM_INTERVAL_MIN_MS, TimeUnit.MILLISECONDS);
+        if (withCAM) {
+            scheduledExecutor.scheduleAtFixedRate(camSender, CAM_INITIAL_DELAY_MS, CAM_INTERVAL_MIN_MS, TimeUnit.MILLISECONDS);
+        }
     }
 
     private void sendReply(Response message, InetAddress tsAddress, int tsPort) {
@@ -809,6 +812,12 @@ public class ItsStation implements AutoCloseable {
 
         boolean isGpsdServerAddress();
 
+        @Option MacAddress getMacAddress();
+
+        boolean isMacAddress();
+
+        @Option boolean withoutCAM();
+
     }
 
     private Geobroadcast dst_cfg_02() {
@@ -888,9 +897,14 @@ public class ItsStation implements AutoCloseable {
         try {
             CliOptions opts = CliFactory.parseArguments(CliOptions.class, args);
             StationConfig config = new StationConfig();
-            boolean hasEthernetHeader = true; //opts.hasEthernetHeader();  // TODO
-            //MacAddress senderMac = new MacAddress(0x00_0C_42_69_9f_aeL);  // TODO
-            MacAddress senderMac = new MacAddress(0x00_0C_42_69_9f_ccL);  // TODO
+            boolean hasEthernetHeader = opts.hasEthernetHeader();
+            if (!hasEthernetHeader && opts.isMacAddress()) {
+                logger.error("Can't have Mac address with no ethernet header support!");
+                System.exit(1);
+            }
+            //MacAddress senderMac = new MacAddress(0x00_0C_42_69_9f_aeL);
+            //MacAddress senderMac = new MacAddress(0x00_0C_42_69_9f_ccL);
+            MacAddress senderMac = opts.isMacAddress() ? opts.getMacAddress() : new MacAddress(0);
             LinkLayer linkLayer = new LinkLayerUdpToEthernet(
                     opts.getLocalPortForUdpLinkLayer(),
                     opts.getRemoteAddressForUdpLinkLayer().asInetSocketAddress(),
@@ -900,18 +914,16 @@ public class ItsStation implements AutoCloseable {
                         new UpdatableGpsdPositionProvider(opts.getGpsdServerAddress().asInetSocketAddress()) :
                         new StaticUpdatablePositionProvider(new Position(opts.getLat(), opts.getLon()));
 
+            final boolean includeCAMs = ! opts.withoutCAM();
             try (ItsStation sut = new ItsStation(config, linkLayer, positionProvider,
-                    opts.getUpperTesterUdpPort(), senderMac)) {
-//                sut.scheduledExecutor.scheduleAtFixedRate(new Runnable() {
-//                    @Override public void run() { sut.send(new Denm(), sut.dst_cfg_02()); }
-//                }, 2, 5, TimeUnit.SECONDS);
-//                sut.scheduledExecutor.scheduleAtFixedRate(new Runnable() {
-//                    @Override public void run() { sut.send(new Denm(), sut.dst_cfg_02()); }
-//                }, 9, 5, TimeUnit.SECONDS);
-//                sut.scheduledExecutor.scheduleAtFixedRate(new Runnable() {
-//                    @Override public void run() { sut.send(new Denm(), sut.dst_cfg_08b()); }
-//                }, 10, 5, TimeUnit.SECONDS);
-                //sut.executor.submit(sut);
+                        opts.getUpperTesterUdpPort(), senderMac, includeCAMs)) {
+
+                // Send some DENMs:
+                int initialDelay = 10, period = 5;
+                sut.scheduledExecutor.scheduleAtFixedRate(new Runnable() {
+                    @Override public void run() { sut.send(new Denm(), sut.dst_cfg_08b()); }
+                }, initialDelay, period, TimeUnit.SECONDS);
+
                 sut.run();  // Infinite loop.
             }
         } catch (ArgumentValidationException e) {
@@ -922,5 +934,4 @@ public class ItsStation implements AutoCloseable {
             System.exit(1);
         }
     }
-
 }
