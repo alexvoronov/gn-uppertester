@@ -12,6 +12,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
+import net.gcdc.asn1.uper.UperEncoder;
 import net.gcdc.camdenm.CoopIts.AccelerationControl;
 import net.gcdc.camdenm.CoopIts.Altitude;
 import net.gcdc.camdenm.CoopIts.AltitudeConfidence;
@@ -64,7 +65,6 @@ import net.gcdc.camdenm.CoopIts.VehicleRole;
 import net.gcdc.camdenm.CoopIts.YawRate;
 import net.gcdc.camdenm.CoopIts.YawRateConfidence;
 import net.gcdc.camdenm.CoopIts.YawRateValue;
-import net.gcdc.camdenm.UperEncoder;
 import net.gcdc.geonetworking.Address;
 import net.gcdc.geonetworking.Area;
 import net.gcdc.geonetworking.BtpPacket;
@@ -138,6 +138,33 @@ public class ItsStation implements AutoCloseable {
     private final static int HIGH_DYNAMICS_CAM_COUNT = 4;
 
     public final static double CAM_LIFETIME_SECONDS = 0.9;
+    private final UpdatablePositionProvider position;
+
+    private InetAddress defaultTsAddress;
+    
+    public ItsStation(StationConfig config, LinkLayer linkLayer, UpdatablePositionProvider position, int udpPort, MacAddress macAddress, boolean withCAM) {
+        this.position = position;
+        DatagramSocket socket = null;
+        try {
+            socket = new DatagramSocket(udpPort);
+        } catch (SocketException e) {
+            logger.error("Unable to open socket for UT communication", e);
+            System.exit(1);
+        } finally {
+            rcvSocket = socket;
+        }
+        station = new GeonetStation(config, linkLayer, position, macAddress);
+        new Thread(station).start();
+        station.startBecon();
+        btpSocket = BtpSocket.on(station);
+        station.addGeonetDataListener(gnListener);
+        executor.submit(btpListener);
+        vehicle = new Vehicle(position);
+        if (withCAM) {
+            scheduledExecutor.scheduleAtFixedRate(camSender, CAM_INITIAL_DELAY_MS, CAM_INTERVAL_MIN_MS, TimeUnit.MILLISECONDS);
+        }
+    }
+
 
     private final GeonetDataListener gnListener = new GeonetDataListener() {
         @Override public void onGeonetDataReceived(GeonetData indication) {
@@ -219,7 +246,7 @@ public class ItsStation implements AutoCloseable {
             try {
                 BtpPacket packet = BtpPacket.singleHop(UperEncoder.encode(cam), PORT_CAM, CAM_LIFETIME_SECONDS);
                 btpSocket.send(packet);
-            } catch (IllegalArgumentException | IllegalAccessException e) {
+            } catch (IllegalArgumentException | UnsupportedOperationException e) {
                 logger.error("Failed to encode CAM", e);
             } catch (IOException e) {
                 logger.error("Failed to send CAM", e);
@@ -236,7 +263,7 @@ public class ItsStation implements AutoCloseable {
             logger.info("sending DENM as BTP packet {} ", packet);
             btpSocket.send(packet);
             logger.debug("btp packet sent with no exception ", packet);
-        } catch (IllegalArgumentException | IllegalAccessException e) {
+        } catch (IllegalArgumentException | UnsupportedOperationException e) {
             logger.error("Failed to encode DENM", e);
         } catch (IOException e) {
             logger.error("Failed to send DENM", e);
@@ -244,10 +271,7 @@ public class ItsStation implements AutoCloseable {
 
     }
 
-    private final UpdatablePositionProvider position;
-
-    private InetAddress defaultTsAddress;
-
+    
     public static interface UpdatablePositionProvider extends PositionProvider {
         public void move(double deltaLatDegrees, double deltaLonDegrees, double deltaElevation);
         public void setSpeed(double speedMetersPerSecond);
@@ -342,31 +366,7 @@ public class ItsStation implements AutoCloseable {
         }
     }
 
-
-
-    public ItsStation(StationConfig config, LinkLayer linkLayer, UpdatablePositionProvider position, int udpPort, MacAddress macAddress, boolean withCAM) {
-        this.position = position;
-        DatagramSocket socket = null;
-        try {
-            socket = new DatagramSocket(udpPort);
-        } catch (SocketException e) {
-            logger.error("Unable to open socket for UT communication", e);
-            System.exit(1);
-        } finally {
-            rcvSocket = socket;
-        }
-        station = new GeonetStation(config, linkLayer, position, macAddress);
-        new Thread(station).start();
-        station.startBecon();
-        btpSocket = BtpSocket.on(station);
-        station.addGeonetDataListener(gnListener);
-        executor.submit(btpListener);
-        vehicle = new Vehicle(position);
-        if (withCAM) {
-            scheduledExecutor.scheduleAtFixedRate(camSender, CAM_INITIAL_DELAY_MS, CAM_INTERVAL_MIN_MS, TimeUnit.MILLISECONDS);
-        }
-    }
-
+    
     private void sendReply(Response message, InetAddress tsAddress, int tsPort) {
         logger.info((tsAddress == null ? "Skip " : "") + "Sending message to TS: " + message);
         if (tsAddress != null) {
@@ -460,7 +460,7 @@ public class ItsStation implements AutoCloseable {
                 return(new CamTriggerResult(REPLY_SUCCESS));
             } else if (message instanceof CamTriggerChangeSpeed) {
                 CamTriggerChangeSpeed typedMessage = (CamTriggerChangeSpeed) message;
-                logger.debug("change speed received by {} cm", typedMessage.speedVariation);
+                logger.debug("change speed received by {} cm/s", typedMessage.speedVariation);
                 position.setSpeed(position.getLatestPosition().speedMetersPerSecond() + 0.01 * typedMessage.speedVariation);
                 logger.debug("speed now {} m/s", position.getLatestPosition().speedMetersPerSecond());
                 return(new CamTriggerResult(REPLY_SUCCESS));
@@ -750,9 +750,10 @@ public class ItsStation implements AutoCloseable {
                                                 .heading(new Heading(
                                                         new HeadingValue((int)(lpv.headingDegreesFromNorth() * 10)),
                                                         new HeadingConfidence(HeadingConfidence.unavailable)))
-                                                .speed(new Speed(
+                                                .speed(lpv.speedMetersPerSecond() < 163.82 ? new Speed(
                                                         new SpeedValue((int)(SpeedValue.oneCentimeterPerSec * lpv.speedMetersPerSecond() * 100.0)),
-                                                        new SpeedConfidence(SpeedConfidence.unavailable)))
+                                                        new SpeedConfidence(SpeedConfidence.unavailable)):
+                                                            new Speed(new SpeedValue(SpeedValue.unavailable), new SpeedConfidence(SpeedConfidence.outOfRange)))
                                                 .driveDirection(DriveDirection.fromCode(driveDirection))
                                                 .curvature(new Curvature(
                                                         new CurvatureValue(curvature),
